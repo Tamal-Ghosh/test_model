@@ -1,20 +1,21 @@
-import numpy as np
+import os
 import torch
-from torch.utils.data import Dataset, Subset
+from torch.utils.data import Dataset
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-class SyntheticDataset(Dataset):
-    def __init__(self, num_samples=1000, max_length=128, num_classes=2):
-        self.num_samples = num_samples
-        self.max_length = max_length
-        # Generate random input_ids, attention_mask, and labels
-        self.input_ids = torch.randint(10, 1000, (num_samples, max_length))
-        self.attention_mask = torch.ones((num_samples, max_length), dtype=torch.long)
-        self.labels = torch.randint(0, num_classes, (num_samples,))
+class ClientDataset(Dataset):
+    """
+    A lightweight PyTorch Dataset wrapper that holds tokenized tensors
+    representing input ids, attention masks, and labels.
+    """
+    def __init__(self, input_ids, attention_mask, labels):
+        self.input_ids = input_ids
+        self.attention_mask = attention_mask
+        self.labels = labels
         
     def __len__(self):
-        return self.num_samples
+        return len(self.labels)
         
     def __getitem__(self, idx):
         return {
@@ -23,103 +24,61 @@ class SyntheticDataset(Dataset):
             "labels": self.labels[idx]
         }
 
-def partition_dataset(dataset, num_clients, partition_type="iid", alpha=0.5):
+def get_glue_dataset(config):
     """
-    Partitions the dataset indices among clients.
-    Supports "iid" (equal partition) and "non_iid" (Dirichlet partition on class labels).
+    Loads and tokenizes the GLUE dataset specified in config.
+    Returns (train_dataset, val_dataset).
     """
-    num_samples = len(dataset)
-    indices = np.arange(num_samples)
+    # Mapping GLUE tasks to their text fields
+    task_to_keys = {
+        "sst2": ("sentence", None),
+        "rte": ("sentence1", "sentence2"),
+        "mrpc": ("sentence1", "sentence2"),
+        "qnli": ("question", "sentence"),
+        "qqp": ("question1", "question2"),
+        "mnli": ("premise", "hypothesis"),
+    }
     
-    if partition_type == "iid":
-        np.random.shuffle(indices)
-        client_indices = np.array_split(indices, num_clients)
-        return [c.tolist() for c in client_indices]
+    task = config.dataset_name.lower()
+    if task not in task_to_keys:
+        raise ValueError(f"Unsupported dataset name: {config.dataset_name}. Must be in {list(task_to_keys.keys())}")
         
-    elif partition_type == "non_iid":
-        # Extract labels from dataset
-        if hasattr(dataset, "labels"):
-            labels = np.array(dataset.labels)
-        elif "labels" in dataset[0]:
-            labels = np.array([x["labels"].item() if isinstance(x["labels"], torch.Tensor) else x["labels"] for x in dataset])
-        elif "label" in dataset[0]:
-            labels = np.array([x["label"].item() if isinstance(x["label"], torch.Tensor) else x["label"] for x in dataset])
+    print(f"[Dataset] Downloading GLUE task '{task}' from Hugging Face...")
+    
+    # Load HuggingFace dataset
+    raw_datasets = load_dataset("glue", task)
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+    
+    # Add pad token if missing
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    sentence1_key, sentence2_key = task_to_keys[task]
+    
+    def tokenize_function(examples):
+        # Tokenize single sentence or sentence pairs
+        if sentence2_key is None:
+            return tokenizer(examples[sentence1_key], padding="max_length", truncation=True, max_length=config.max_length)
         else:
-            # Try to fetch from features if Hugging Face Dataset
-            try:
-                labels = np.array(dataset["label"])
-            except Exception:
-                try:
-                    labels = np.array(dataset["labels"])
-                except Exception:
-                    raise ValueError("Cannot extract labels from the dataset for partitioning.")
-                    
-        num_classes = len(np.unique(labels))
-        client_indices = [[] for _ in range(num_clients)]
-        
-        for c in range(num_classes):
-            class_indices = np.where(labels == c)[0]
-            np.random.shuffle(class_indices)
+            return tokenizer(examples[sentence1_key], examples[sentence2_key], padding="max_length", truncation=True, max_length=config.max_length)
             
-            # Dirichlet proportions for class c
-            proportions = np.random.dirichlet([alpha] * num_clients)
-            proportions = (proportions * len(class_indices)).astype(int)
-            
-            # Adjustment for rounding errors
-            diff = len(class_indices) - proportions.sum()
-            for i in range(diff):
-                proportions[i % num_clients] += 1
-                
-            start = 0
-            for k in range(num_clients):
-                end = start + proportions[k]
-                client_indices[k].extend(class_indices[start:end])
-                start = end
-                
-        # Shuffle client indices
-        for k in range(num_clients):
-            np.random.shuffle(client_indices[k])
-            
-        return client_indices
-
-def get_datasets(config):
-    """
-    Loads dataset (SST-2 or Synthetic) and returns (train_dataset, val_dataset, client_partition_indices)
-    """
-    if config.model_name == "toy":
-        print("Using synthetic dataset for toy model...")
-        train_dataset = SyntheticDataset(num_samples=600, max_length=config.max_length, num_classes=config.num_labels)
-        val_dataset = SyntheticDataset(num_samples=100, max_length=config.max_length, num_classes=config.num_labels)
-    else:
-        print(f"Loading SST-2 dataset for {config.model_name}...")
-        try:
-            raw_datasets = load_dataset("glue", "sst2")
-            tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-            
-            # Add pad_token if not set
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-                
-            def tokenize_function(examples):
-                return tokenizer(examples["sentence"], padding="max_length", truncation=True, max_length=config.max_length)
-                
-            tokenized_datasets = raw_datasets.map(tokenize_function, batched=True)
-            tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
-            tokenized_datasets.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
-            
-            train_dataset = tokenized_datasets["train"]
-            val_dataset = tokenized_datasets["validation"]
-        except Exception as e:
-            print(f"Failed to load SST-2 from Hugging Face: {e}. Falling back to SyntheticDataset.")
-            train_dataset = SyntheticDataset(num_samples=600, max_length=config.max_length, num_classes=config.num_labels)
-            val_dataset = SyntheticDataset(num_samples=100, max_length=config.max_length, num_classes=config.num_labels)
-            
-    # Partition indices
-    client_indices = partition_dataset(
-        train_dataset, 
-        num_clients=config.num_clients, 
-        partition_type=config.partition_type, 
-        alpha=config.alpha
+    print(f"[Dataset] Tokenizing '{task}' split datasets...")
+    tokenized_datasets = raw_datasets.map(tokenize_function, batched=True, remove_columns=raw_datasets["train"].column_names)
+    
+    # For MNLI, validate on validation_matched split. For others, use validation split.
+    val_split = "validation_matched" if task == "mnli" else "validation"
+    
+    train_dataset = ClientDataset(
+        input_ids=torch.tensor(tokenized_datasets["train"]["input_ids"]),
+        attention_mask=torch.tensor(tokenized_datasets["train"]["attention_mask"]),
+        labels=torch.tensor(raw_datasets["train"]["label"])
     )
     
-    return train_dataset, val_dataset, client_indices
+    val_dataset = ClientDataset(
+        input_ids=torch.tensor(tokenized_datasets[val_split]["input_ids"]),
+        attention_mask=torch.tensor(tokenized_datasets[val_split]["attention_mask"]),
+        labels=torch.tensor(raw_datasets[val_split]["label"])
+    )
+    
+    print(f"[Dataset] Preprocessing complete. Train samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
+    return train_dataset, val_dataset

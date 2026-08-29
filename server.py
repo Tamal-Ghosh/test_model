@@ -1,36 +1,47 @@
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
+from sklearn.metrics import f1_score, accuracy_score
+
 from client import Client, get_trainable_state_dict, load_trainable_state_dict
 from federated import federated_average
+from utils import get_device
 
 class Server:
+    """
+    Coordinates the global server actions.
+    Responsible for selecting active clients, aggregating parameter updates, 
+    and evaluating the global model on the validation dataset.
+    """
     def __init__(self, model, train_dataset, val_dataset, client_indices, config):
         self.model = model
         self.val_dataset = val_dataset
         self.config = config
         
-        # Initialize clients with their specific subset of indices
+        # 1. Instantiate the clients and distribute their partitioned datasets
         self.clients = []
         for k in range(config.num_clients):
-            client_data = Subset(train_dataset, client_indices[k])
-            self.clients.append(Client(client_id=k, dataset=client_data, config=config))
+            # Take client indices subset of train dataset
+            client_subset = Subset(train_dataset, client_indices[k])
+            self.clients.append(Client(client_id=k, dataset=client_subset, config=config))
             
-        # Extract initial global trainable weights
+        # 2. Extract initial global trainable weights
         self.global_weights = get_trainable_state_dict(self.model)
         
     def evaluate(self):
         """
         Evaluates the global model on the validation dataset.
+        Computes validation loss, accuracy, and F1 score.
         """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
         self.model.to(device)
         self.model.eval()
         
         dataloader = DataLoader(self.val_dataset, batch_size=self.config.local_batch_size, shuffle=False)
         total_loss = 0.0
-        correct = 0
-        total = 0
+        
+        all_preds = []
+        all_labels = []
         
         with torch.no_grad():
             for batch in dataloader:
@@ -39,54 +50,60 @@ class Server:
                 labels = batch["labels"].to(device)
                 
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                
-                # Check output type and fetch loss/logits
                 loss = outputs.loss
                 logits = outputs.logits
                 
                 total_loss += loss.item()
                 preds = torch.argmax(logits, dim=1)
-                correct += (preds == labels).sum().item()
-                total += labels.size(0)
                 
-        # Send model back to CPU
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+                
+        # Send model back to CPU to save device memory
         self.model.to("cpu")
         
-        num_batches = len(dataloader)
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0
-        accuracy = correct / total if total > 0 else 0
-        return avg_loss, accuracy
+        avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else 0.0
         
-    def fit_round(self, round_idx):
+        # Calculate accuracy and F1 score
+        acc = accuracy_score(all_labels, all_preds)
+        
+        # If binary classification, compute binary F1. For multi-class, use macro F1
+        unique_labels = np.unique(all_labels)
+        if len(unique_labels) <= 2:
+            f1 = f1_score(all_labels, all_preds, average="binary", zero_division=0)
+        else:
+            f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+            
+        return avg_loss, acc, f1
+        
+    def fit_round(self, round_idx: int) -> float:
         """
-        Coordinates a single round of federated training.
+        Selects a random fraction of clients, conducts local training, 
+        and updates the global weights using FedAvg.
         """
-        # Determine number of clients to select
+        # 1. Client Sampling (without replacement)
         num_sampled = max(1, int(self.config.num_clients * self.config.fraction_fit))
-        sampled_client_indices = np.random.choice(self.config.num_clients, num_sampled, replace=False)
+        sampled_indices = np.random.choice(self.config.num_clients, num_sampled, replace=False)
         
-        print(f"\n--- Round {round_idx} ---")
-        print(f"Selected clients: {sampled_client_indices.tolist()}")
+        print(f"\n[Server Round {round_idx}] Active Client IDs: {sampled_indices.tolist()}")
         
         client_updates = []
         local_losses = []
         
-        for client_id in sampled_client_indices:
-            client = self.clients[client_id]
-            print(f"  Training client {client_id} (samples: {len(client.dataset)})...")
-            
-            # Perform local training
+        # 2. Sequential training of clients (sequential simulation of parallel training)
+        for idx in sampled_indices:
+            client = self.clients[idx]
+            # Instruct client to perform local training
             updated_weights, size, loss = client.local_train(self.model, self.global_weights)
+            
             client_updates.append((updated_weights, size))
             local_losses.append(loss)
             
-            print(f"    Client {client_id} training loss: {loss:.4f}")
-            
-        # FedAvg Aggregation
-        print("  Aggregating updates...")
+        # 3. Federated Averaging (Aggregation)
+        print(f"[Server Round {round_idx}] Aggregating parameters from {len(client_updates)} clients...")
         self.global_weights = federated_average(client_updates)
         
-        # Load aggregated weights back to global model
+        # 4. Synchronize the global model with the newly aggregated weights
         load_trainable_state_dict(self.model, self.global_weights)
         
         avg_local_loss = np.mean(local_losses)
