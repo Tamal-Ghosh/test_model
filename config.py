@@ -3,36 +3,37 @@ from typing import List
 
 @dataclass
 class FLConfig:
-    # Model Configurations
-    # distilroberta-base (82M params) fits in 2GB VRAM and is 100% compatible with all PEFT methods.
-    model_name: str = "distilroberta-base"
+    # Model Configuration
+    # Actual model evaluated in Table 2, 3, 4 of the paper
+    model_name: str = "roberta-base"
     num_labels: int = 2
-    max_length: int = 64              
+    max_length: int = 128             # Paper default: 128
     
     # Dataset Configuration
+    # Options: "sst2", "rte", "mrpc", "qnli", "qqp", "mnli"
     dataset_name: str = "sst2"
     
-    # Optional Sample Subsampling for resource-constrained devices
+    # Optional sample limiting (default None = full dataset)
     max_train_samples: int = None
     max_val_samples: int = None
     
-    # Federated Learning Parameters (Optimized for 2GB VRAM & Laptop execution)
-    num_clients: int = 5              
-    fraction_fit: float = 0.6         # 3 active clients per round (5 * 0.6)
-    num_rounds: int = 5               
-    local_epochs: int = 1             
-    local_batch_size: int = 4         # Reduced from 16 to fit in 2GB VRAM
-    lr: float = 1e-3                  
-    seed: int = 42                    
+    # Federated Learning Parameters (Paper setup)
+    num_clients: int = 10             # Cross-silo: 10, Cross-device: 1000
+    fraction_fit: float = 1.0         # Cross-silo: 10/10 active, Cross-device: 10/1000 active
+    num_rounds: int = 100             # Paper default: 100 communication rounds
+    local_epochs: int = 1             # Paper default: 1 local epoch
+    local_batch_size: int = 16        # Paper default: 16
+    lr: float = 1e-3                  # Default learning rate
+    seed: int = 42                    # Reproducibility seed
     
     # Non-IID Parameter (Dirichlet)
-    dirichlet_alpha: float = 1.0      
+    dirichlet_alpha: float = 1.0      # Paper default: 1.0 (also tested 0.1 and 10.0)
     
     # PEFT Method Selection
     # Options: "none" (FedFT), "adapter" (FedAP), "prefix" (FedPF), "lora" (FedLR), "bitfit" (FedBF)
     peft_method: str = "lora"
     
-    # PEFT Specific Hyperparameters
+    # PEFT Specific Hyperparameters (Paper setup)
     # LoRA (FedLR)
     lora_r: int = 8
     lora_alpha: int = 16
@@ -43,150 +44,26 @@ class FLConfig:
     prefix_num_virtual_tokens: int = 16
     
     # Adapter (FedAP)
-    adapter_reduction_factor: int = 16  
+    adapter_reduction_factor: int = 16  # Bottleneck dimension: 768 / 16 = 48
     
     # Privacy / Gradient Inversion Parameters
-    privacy_num_samples: int = 4      
-    privacy_attack_steps: int = 100   
+    privacy_num_samples: int = 128    # Paper evaluated on 128 samples
+    privacy_attack_steps: int = 1000  # DLG optimization steps
     
     def apply_defaults(self):
         """
-        Keeps the optimized configurations intact for this hardware environment.
-        Adjusts learning rate dynamically.
+        Dynamically configures client scaling and learning rates according to the paper:
+        - Cross-silo (SST-2, RTE, MRPC): 10 total clients, 10 active per round.
+        - Cross-device (QNLI, QQP, MNLI): 1000 total clients, 10 active per round.
         """
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        if self.dataset_name.lower() in ["rte", "mrpc", "sst2"]:
+            self.num_clients = 10
+            self.fraction_fit = 1.0  # 10 active out of 10
+        else:
+            self.num_clients = 1000
+            self.fraction_fit = 0.01 # 10 active out of 1000
+            
+        # Paper optimal learning rate assignments
         if self.peft_method.lower() == "none":
             self.lr = 1e-4
         else:

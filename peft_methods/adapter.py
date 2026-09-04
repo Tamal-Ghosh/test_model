@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 
-class GenericAdapterWrapper(nn.Module):
+class RobertaAdapterWrapper(nn.Module):
     """
-    A model-agnostic bottleneck adapter wrapper.
-    Can wrap any sub-module (attention output, linear layers, FFN) and handles
-    both tensor outputs and tuple outputs gracefully.
+    Houlsby-style bottleneck adapter wrapper for RoBERTa.
+    Inserted after self-attention output and intermediate feedforward layer outputs.
     """
     def __init__(self, original_module: nn.Module, hidden_dim: int, bottleneck_dim: int):
         super().__init__()
@@ -14,59 +13,41 @@ class GenericAdapterWrapper(nn.Module):
         self.act = nn.GELU()
         self.up = nn.Linear(bottleneck_dim, hidden_dim)
         
-        # Identity initialization
+        # Identity initialization: initialize up projection weights/bias to 0
+        # so that adapter acts as an identity function at step 0.
         nn.init.normal_(self.down.weight, std=0.01)
         nn.init.zeros_(self.down.bias)
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
         
-    def forward(self, *args, **kwargs):
-        # 1. Run the original module forward
-        x = self.original_module(*args, **kwargs)
-        
-        # 2. Extract hidden states (handles tuple outputs like (hidden_states, attentions))
-        if isinstance(x, tuple):
-            hidden_states = x[0]
-            a = self.up(self.act(self.down(hidden_states)))
-            return (hidden_states + a,) + x[1:]
-        else:
-            a = self.up(self.act(self.down(x)))
-            return x + a
+    def forward(self, hidden_states, input_tensor):
+        # 1. Forward through RoBERTa's original module (Dense + Dropout + LayerNorm)
+        x = self.original_module(hidden_states, input_tensor)
+        # 2. Bottleneck down-projection -> Activation -> Up-projection
+        a = self.up(self.act(self.down(x)))
+        # 3. Residual connection
+        return x + a
 
 def configure_adapter(model: nn.Module, config) -> nn.Module:
     """
-    Freezes the base model parameters and injects adapter layers.
-    Detects model architecture (RoBERTa or ALBERT) and applies wrappers.
+    Freezes all RoBERTa base model parameters and injects Houlsby bottleneck adapters.
     """
-    print("[PEFT - Adapter] Freezing base model and injecting adapters...")
+    print("[PEFT - Adapter] Freezing roberta-base and injecting Houlsby bottleneck adapters...")
     
-    # 1. Freeze all base parameters first
+    # 1. Freeze all base parameters
     for param in model.parameters():
         param.requires_grad = False
         
-    hidden_dim = model.config.hidden_size
-    bottleneck_dim = hidden_dim // config.adapter_reduction_factor
+    hidden_dim = model.config.hidden_size # 768 for roberta-base
+    bottleneck_dim = hidden_dim // config.adapter_reduction_factor # 768 // 16 = 48
     
-    # 2. Add adapters depending on model family
-    if hasattr(model, "roberta"):
-        print("[PEFT - Adapter] Wrapping RoBERTa encoder submodules...")
-        for i in range(len(model.roberta.encoder.layer)):
-            layer = model.roberta.encoder.layer[i]
-            layer.attention.output = GenericAdapterWrapper(layer.attention.output, hidden_dim, bottleneck_dim)
-            layer.output = GenericAdapterWrapper(layer.output, hidden_dim, bottleneck_dim)
-            
-    elif hasattr(model, "albert"):
-        print("[PEFT - Adapter] Wrapping ALBERT shared encoder submodules...")
-        for group in model.albert.encoder.albert_layer_groups:
-            for layer in group.albert_layers:
-                layer.attention = GenericAdapterWrapper(layer.attention, hidden_dim, bottleneck_dim)
-                layer.ffn_output = GenericAdapterWrapper(layer.ffn_output, hidden_dim, bottleneck_dim)
-                
-    else:
-        # Generic fallback: print warning and raise error if no match
-        raise NotImplementedError("Adapter injection is only implemented for RoBERTa and ALBERT model architectures.")
+    # 2. Inject adapters after attention output and feedforward output in every RoBERTa encoder layer
+    for i in range(len(model.roberta.encoder.layer)):
+        layer = model.roberta.encoder.layer[i]
+        layer.attention.output = RobertaAdapterWrapper(layer.attention.output, hidden_dim, bottleneck_dim)
+        layer.output = RobertaAdapterWrapper(layer.output, hidden_dim, bottleneck_dim)
         
-    # 3. Keep classification head trainable
+    # 3. Keep sequence classification head trainable
     if hasattr(model, "classifier"):
         for param in model.classifier.parameters():
             param.requires_grad = True
