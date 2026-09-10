@@ -39,7 +39,10 @@ def configure_adapter(model: nn.Module, config) -> nn.Module:
         param.requires_grad = False
         
     hidden_dim = model.config.hidden_size # 768 for roberta-base
-    bottleneck_dim = hidden_dim // config.adapter_reduction_factor # 768 // 16 = 48
+    if hasattr(config, "adapter_bottleneck_dim") and config.adapter_bottleneck_dim is not None:
+        bottleneck_dim = config.adapter_bottleneck_dim
+    else:
+        bottleneck_dim = hidden_dim // getattr(config, "adapter_reduction_factor", 16)
     
     # 2. Inject adapters after attention output and feedforward output in every RoBERTa encoder layer
     for i in range(len(model.roberta.encoder.layer)):

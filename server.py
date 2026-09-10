@@ -28,18 +28,12 @@ class Server:
         # 2. Extract initial global trainable weights
         self.global_weights = get_trainable_state_dict(self.model)
         
-    def evaluate(self):
-        """
-        Evaluates the global model on the validation dataset.
-        Computes validation loss, accuracy, and F1 score.
-        """
+    def _evaluate_on_loader(self, dataloader):
         device = get_device()
         self.model.to(device)
         self.model.eval()
         
-        dataloader = DataLoader(self.val_dataset, batch_size=self.config.local_batch_size, shuffle=False)
         total_loss = 0.0
-        
         all_preds = []
         all_labels = []
         
@@ -50,54 +44,61 @@ class Server:
                 labels = batch["labels"].to(device)
                 
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
-                logits = outputs.logits
-                
-                total_loss += loss.item()
-                preds = torch.argmax(logits, dim=1)
+                total_loss += outputs.loss.item()
+                preds = torch.argmax(outputs.logits, dim=1)
                 
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
                 
-        # Send model back to CPU to save device memory
         self.model.to("cpu")
         
         avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else 0.0
-        
-        # Calculate accuracy and F1 score
-        acc = accuracy_score(all_labels, all_preds)
-        
-        # If binary classification, compute binary F1. For multi-class, use macro F1
-        unique_labels = np.unique(all_labels)
-        if len(unique_labels) <= 2:
-            f1 = f1_score(all_labels, all_preds, average="binary", zero_division=0)
-        else:
-            f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-            
+        acc = accuracy_score(all_labels, all_preds) if len(all_labels) > 0 else 0.0
+        f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0) if len(all_labels) > 0 else 0.0
         return avg_loss, acc, f1
-        
-    def fit_round(self, round_idx: int) -> float:
+
+    def evaluate(self):
         """
-        Selects a random fraction of clients, conducts local training, 
-        and updates the global weights using FedAvg.
+        Evaluates the global model on the validation dataset.
+        Computes validation loss, accuracy, and Macro-F1 score.
+        """
+        dataloader = DataLoader(self.val_dataset, batch_size=self.config.local_batch_size, shuffle=False)
+        return self._evaluate_on_loader(dataloader)
+
+    def evaluate_clients(self):
+        """
+        Evaluates the current global model on each client's partition.
+        Returns client-wise {client_id: {'loss': ..., 'acc': ..., 'f1': ...}}
+        """
+        client_stats = {}
+        for client in self.clients:
+            dataloader = DataLoader(client.dataset, batch_size=self.config.local_batch_size, shuffle=False)
+            loss, acc, f1 = self._evaluate_on_loader(dataloader)
+            client_stats[client.client_id] = {"loss": loss, "acc": acc, "f1": f1}
+        return client_stats
+        
+    def fit_round(self, round_idx: int) -> dict:
+        """
+        Selects active clients (all 10 in our 100% participation setup),
+        conducts local training sequentially, aggregates parameter updates using FedAvg,
+        and returns round-level training statistics.
         """
         # 1. Client Sampling (without replacement)
         num_sampled = max(1, int(self.config.num_clients * self.config.fraction_fit))
         sampled_indices = np.random.choice(self.config.num_clients, num_sampled, replace=False)
+        sampled_indices = sorted(sampled_indices.tolist())
         
-        print(f"\n[Server Round {round_idx}] Active Client IDs: {sampled_indices.tolist()}")
+        print(f"\n[Server Round {round_idx}] Active Client IDs: {sampled_indices}")
         
         client_updates = []
-        local_losses = []
+        client_train_losses = {}
         
-        # 2. Sequential training of clients (sequential simulation of parallel training)
+        # 2. Sequential local training
         for idx in sampled_indices:
             client = self.clients[idx]
-            # Instruct client to perform local training
             updated_weights, size, loss = client.local_train(self.model, self.global_weights)
-            
             client_updates.append((updated_weights, size))
-            local_losses.append(loss)
+            client_train_losses[idx] = loss
             
         # 3. Federated Averaging (Aggregation)
         print(f"[Server Round {round_idx}] Aggregating parameters from {len(client_updates)} clients...")
@@ -106,5 +107,10 @@ class Server:
         # 4. Synchronize the global model with the newly aggregated weights
         load_trainable_state_dict(self.model, self.global_weights)
         
-        avg_local_loss = np.mean(local_losses)
-        return avg_local_loss
+        avg_train_loss = float(np.mean(list(client_train_losses.values())))
+        
+        return {
+            "round": round_idx,
+            "avg_train_loss": avg_train_loss,
+            "client_train_losses": client_train_losses,
+        }

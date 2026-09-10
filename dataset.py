@@ -24,11 +24,52 @@ class ClientDataset(Dataset):
             "labels": self.labels[idx]
         }
 
-def get_glue_dataset(config):
+def get_dataset(config):
     """
-    Loads and tokenizes the GLUE dataset specified in config.
+    Loads and tokenizes the requested dataset (AG News or GLUE).
     Returns (train_dataset, val_dataset).
     """
+    task = config.dataset_name.lower()
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if task == "ag_news":
+        print("[Dataset] Loading AG News dataset from Hugging Face...")
+        raw_datasets = load_dataset("ag_news")
+        train_split = raw_datasets["train"]
+        val_split = raw_datasets["test"]  # Standard AG News test split for evaluation
+
+        if config.max_train_samples is not None and config.max_train_samples < len(train_split):
+            train_split = train_split.shuffle(seed=config.seed).select(range(config.max_train_samples))
+        if config.max_val_samples is not None and config.max_val_samples < len(val_split):
+            val_split = val_split.shuffle(seed=config.seed).select(range(config.max_val_samples))
+
+        print(f"[Dataset] Tokenizing AG News (max_length={config.max_length})...")
+        train_tok = train_split.map(
+            lambda x: tokenizer(x["text"], padding="max_length", truncation=True, max_length=config.max_length),
+            batched=True,
+            remove_columns=["text"]
+        )
+        val_tok = val_split.map(
+            lambda x: tokenizer(x["text"], padding="max_length", truncation=True, max_length=config.max_length),
+            batched=True,
+            remove_columns=["text"]
+        )
+
+        train_dataset = ClientDataset(
+            input_ids=torch.tensor(train_tok["input_ids"]),
+            attention_mask=torch.tensor(train_tok["attention_mask"]),
+            labels=torch.tensor(train_tok["label"])
+        )
+        val_dataset = ClientDataset(
+            input_ids=torch.tensor(val_tok["input_ids"]),
+            attention_mask=torch.tensor(val_tok["attention_mask"]),
+            labels=torch.tensor(val_tok["label"])
+        )
+        print(f"[Dataset] Preprocessing complete. Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+        return train_dataset, val_dataset
+
     # Mapping GLUE tasks to their text fields
     task_to_keys = {
         "sst2": ("sentence", None),
@@ -39,24 +80,14 @@ def get_glue_dataset(config):
         "mnli": ("premise", "hypothesis"),
     }
     
-    task = config.dataset_name.lower()
     if task not in task_to_keys:
-        raise ValueError(f"Unsupported dataset name: {config.dataset_name}. Must be in {list(task_to_keys.keys())}")
+        raise ValueError(f"Unsupported dataset name: {config.dataset_name}. Must be 'ag_news' or in {list(task_to_keys.keys())}")
         
     print(f"[Dataset] Downloading GLUE task '{task}' from Hugging Face...")
-    
-    # Load HuggingFace dataset
     raw_datasets = load_dataset("glue", task)
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-    
-    # Add pad token if missing
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        
     sentence1_key, sentence2_key = task_to_keys[task]
     
     def tokenize_function(examples):
-        # Tokenize single sentence or sentence pairs
         if sentence2_key is None:
             return tokenizer(examples[sentence1_key], padding="max_length", truncation=True, max_length=config.max_length)
         else:
@@ -65,8 +96,7 @@ def get_glue_dataset(config):
     print(f"[Dataset] Tokenizing '{task}' split datasets...")
     tokenized_datasets = raw_datasets.map(tokenize_function, batched=True, remove_columns=raw_datasets["train"].column_names)
     
-    # For MNLI, validate on validation_matched split. For others, use validation split.
-    val_split = "validation_matched" if task == "mnli" else "validation"
+    val_split_name = "validation_matched" if task == "mnli" else "validation"
     
     train_dataset = ClientDataset(
         input_ids=torch.tensor(tokenized_datasets["train"]["input_ids"]),
@@ -75,10 +105,13 @@ def get_glue_dataset(config):
     )
     
     val_dataset = ClientDataset(
-        input_ids=torch.tensor(tokenized_datasets[val_split]["input_ids"]),
-        attention_mask=torch.tensor(tokenized_datasets[val_split]["attention_mask"]),
-        labels=torch.tensor(raw_datasets[val_split]["label"])
+        input_ids=torch.tensor(tokenized_datasets[val_split_name]["input_ids"]),
+        attention_mask=torch.tensor(tokenized_datasets[val_split_name]["attention_mask"]),
+        labels=torch.tensor(raw_datasets[val_split_name]["label"])
     )
     
     print(f"[Dataset] Preprocessing complete. Train samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
     return train_dataset, val_dataset
+
+# Compatibility alias
+get_glue_dataset = get_dataset
