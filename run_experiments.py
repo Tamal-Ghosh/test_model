@@ -9,6 +9,15 @@ import numpy as np
 # Prevent OpenMP conflict on Windows
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# Kaggle/Colab Fix: Bypass torchao version incompatibility bug in PEFT
+try:
+    import peft.import_utils
+    peft.import_utils.is_torchao_available = lambda: False
+    import peft.tuners.lora.torchao
+    peft.tuners.lora.torchao.is_torchao_available = lambda: False
+except Exception:
+    pass
+
 from config import FLConfig
 from dataset import get_dataset
 from partition import dirichlet_partition
