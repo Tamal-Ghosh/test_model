@@ -1,72 +1,143 @@
-# FedPETuning: Federated Parameter-Efficient Tuning (পেপার রিপ্রোডাকশন গাইড)
+# Federated PEFT: Benchmarking Parameter-Efficient Fine-Tuning under Client Heterogeneity
 
-এই রিপোজিটরিটি পেপার **“FedPETuning: Federated Parameter-Efficient Tuning of Large Language Models”** (https://arxiv.org/pdf/2212.10025) এর একটি পুঙ্খানুপুঙ্খ, মডুলার এবং আসল ইমপ্লিমেন্টেশন। এটি ক্লায়েন্ট ডিভাইসে প্রাইভেট ডেটা সংরক্ষণ করে প্রি-ট্রেইন্ড ল্যাঙ্গুয়েজ মডেল (`roberta-base`) ফাইন-টিউন করার জন্য বিভিন্ন প্যারামিটার-এফিশিয়েন্ট টিউনিং (PEFT) মেথডের তুলনা করে।
-
----
-
-## ১. পেপারের মডেল ও তুলনামূলক বেঞ্চমার্ক ফলাফল (`roberta-base`)
-
-নিচের টেবিলটি `roberta-base` মডেল ও `SST-2` ডেটাসেটে প্রাপ্ত তুলনামূলক ফলাফল ধারণ করে:
-
-| পদ্ধতি (Method) | অ্যাকুরিসি (Accuracy) | F1 স্কোর | মোট প্যারামিটার | ট্রেইনেবল প্যারামিটার | ট্রেইনেবল % | কম্যুনিকেশন খরচ | ডাটা সাশ্রয় (%) | DLG রিকভারি সঠিকতা | প্রাইভেসি ডিফেন্স উন্নতি |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **NONE** (Full FT) | 0.4800 | 0.6486 | 124,647,170 | 124,647,170 | 100.00% | 14264.44 MB | 0.00% | 0.9375 | 0.0% |
-| **ADAPTER** (FedAP) | 0.4800 | 0.6486 | 126,419,714 | 1,772,546 | 1.40% | 202.85 MB | **98.58%** | 0.0204 | 40.7% |
-| **PREFIX** (FedPF) | 0.4800 | 0.6486 | 125,631,746 | 984,576 | 0.78% | 112.68 MB | **99.21%** | 0.0455 | 40.7% |
-| **LORA** (FedLR) | 0.4800 | 0.6486 | 125,531,906 | 884,736 | 0.71% | 101.25 MB | **99.29%** | 0.0217 | 40.7% |
-| **BITFIT** (FedBF) | 0.4800 | 0.6486 | 124,647,170 | 769,536 | 0.62% | 88.06 MB | **99.38%** | 0.0164 | 40.7% |
+এই রিপোজিটরিটি ফেডারেটেড লার্নিং (FL) পরিবেশে প্রি-ট্রেইন্ড ল্যাঙ্গুয়েজ মডেল (`roberta-base`) এবং **AG News** ডেটাসেটের ওপর ৪টি প্রধান **প্যারামিটার-এফিশিয়েন্ট ফাইন-টিউনিং (PEFT)** মেথডের পারফরম্যান্স এবং ডেটা হেটারোজেনিটি (Non-IID) সহনশীলতা মূল্যায়নের জন্য একটি সম্পূর্ণ ও মডুলার ফ্রেমওয়ার্ক।
 
 ---
 
-## ২. ফাইল এবং ডিরেক্টরি পরিচিতি (File Architecture)
+## ১. এক্সপেরিমেন্টাল ম্যাট্রিক্স (Experimental Design)
 
-কোডবেসটি সম্পূর্ণ পেপারের মেথডোলজি অনুযায়ী গঠিত:
+```
+                 ৪টি PEFT METHODS
+          ┌──────┬──────┬──────┬──────┐
+          │ LoRA │Adapt │Prefix│ IA³  │
+          └──────┴──────┴──────┴──────┘
+                    ×
+             ৩টি PARAMETER BUDGETS
+             ┌─────┬─────┬─────┐
+             │100K │500K │ 1M  │
+             └─────┴─────┴─────┘
+                    ×
+          ৪টি HETEROGENEITY LEVELS
+          ┌─────┬─────┬─────┬──────┐
+          │ 1.0 │ 0.5 │ 0.1 │ 0.01 │
+          └─────┴─────┴─────┴──────┘
+                  = ৪৮টি Configurations
+                    × ৩টি Random Seeds (42, 43, 44)
+                  = ১৪৪টি Training Runs
+```
 
-* **`config.py`:** পেপারের সকল হাইপারপ্যারামিটার (`roberta-base`, ১০০ রাউন্ড, ১৬ ব্যাচ সাইজ, Dirichlet $\alpha=1.0$) কেন্দ্রীভূত রাখে।
-* **`dataset.py`:** Hugging Face থেকে সরাসরি GLUE ডেটাসেট (SST-2, RTE, MRPC, QNLI, QQP, MNLI) ডাউনলোড ও টোকেনাইজ করে।
-* **`partition.py`:** পেপারের মেথড অনুযায়ী **Dirichlet Distribution ($\alpha$)** ব্যবহার করে ক্লায়েন্টদের মধ্যে নন-আইআইডি ডেটা বণ্টন করে।
-* **`model.py`:** `roberta-base` মডেল লোড করে এবং নির্দিষ্ট PEFT মেথড ইনজেক্ট করে।
+* **Pretrained Model:** `roberta-base` (১২টি লেয়ার, ৭৬৮ হিডেন ডাইমেনশন, মোট ১২৪.১৭ মিলিয়ন প্যারামিটার)
+* **Dataset:** AG News (৪টি ক্লাস: World, Sports, Business, Sci/Tech)
+* **Clients:** ১০ জন ক্লায়েন্ট (১০০% পার্টিসিপেশন, Cross-Silo)
+* **FL Algorithm:** FedAvg (স্যাম্পল সাইজের অনুপাতে ওয়েটেড প্যারামিটার অ্যাগ্রিগেশন)
+* **FL Rounds:** ৫০ রাউন্ডস
+* **Non-IID Partition:** Dirichlet Distribution ($\alpha \in [1.0, 0.5, 0.1, 0.01]$)
+
+---
+
+## ২. প্যারামিটার বাজেট ক্যালিব্রেশন (Strict Budget Matching)
+
+| PEFT Method | Low Budget (~100K Target) | Medium Budget (~500K Target) | High Budget (~1M Target) |
+|---|---|---|---|
+| **LoRA** | **113,668** (~113K) <br> *(rank $r=3$)* | **519,172** (~519K) <br> *(rank $r=14$)* | **998,404** (~998.4K) <br> *(rank $r=27$)* |
+| **Adapter** (Houlsby) | **95,284** (~95K) <br> *(bottleneck $m=2$)* | **501,052** (~501K) <br> *(bottleneck $m=13$)* | **1,017,484** (~1.01M) <br> *(bottleneck $m=27$)* |
+| **Prefix-Tuning** | **95,236** (~95K) <br> *(tokens $l=5$)* | **500,740** (~500K) <br> *(tokens $l=27$)* | **998,404** (~998.4K) <br> *(tokens $l=54$)* |
+| **$\text{IA}^3$** | **76,804** (~77K) <br> *(full arch vectors)* | **76,804** (~77K) <br> *(architectural cap)* | **76,804** (~77K) <br> *(architectural cap)* |
+
+> **Lightweight Head নোট:** RoBERTa-র সাধারণ ক্লাসিফায়ার হেডে প্রায় ৫৯৪K প্যারামিটার থাকে, যা লো-বাজেটকে নষ্ট করে দেয়। তাই আমরা একটি একক লিনিয়ার ক্লাসিফায়ার হেড ($768 \to 4 = \mathbf{3,076}$ params) ব্যবহার করেছি, যাতে বাজেটের প্রায় সম্পূর্ণ অংশ PEFT মডিউলের জন্য সংরক্ষিত থাকে।
+
+---
+
+## ৩. আর্কিটেকচার লেভেল থেকে প্যারামিটার সূত্র
+
+1. **LoRA Formula:**
+   $$N(r) = 12 \text{ layers} \times 2 \text{ matrices (q, v)} \times (2 \times 768 \times r) + 3,076 = 36,864 \times r + 3,076$$
+2. **Bottleneck Adapter Formula (Houlsby):**
+   $$N(m) = 24 \text{ adapters} \times (1,537 \times m + 768) + 3,076 = 36,888 \times m + 18,432 + 3,076$$
+3. **Prefix-Tuning Formula:**
+   $$N(l) = 2 \text{ (key/val)} \times 12 \text{ layers} \times 768 \times l + 3,076 = 18,432 \times l + 3,076$$
+4. **$\text{IA}^3$ Formula:**
+   $$N_{\text{IA}^3} = 12 \text{ layers} \times (768_{\text{k}} + 768_{\text{v}} + 768_{\text{dense}} + 768_{\text{dense}} + 3072_{\text{out}}) + 3,076 = \mathbf{76,804}$$
+
+---
+
+## ৪. ফাইল এবং ডিরেক্টরি পরিচিতি
+
+* **`config.py`:** কেন্দ্রীয় কনফিগারেশন ক্লাস (`FLConfig`)।
+* **`dataset.py`:** AG News ডেটাসেট ডাউনলোড, টোকেনাইজেশন ও PyTorch ডাটাসেট র‍্যাপার।
+* **`partition.py`:** সিড-ভিত্তিক Dirichlet Non-IID ডেটা ডিস্ট্রিবিউটর।
+* **`model.py`:** RoBERTa-base মডেল লোডার, Lightweight হেড সংযোজন ও বাজেট ক্যালিব্রেটর।
 * **`peft_methods/`:**
-  - `full_ft.py`: FedFT (Full Fine-Tuning Baseline - ১০০% প্যারামিটার ট্রেইনেবল)।
-  - `adapter.py`: FedAP (Houlsby-style bottleneck adapters RoBERTa attention ও intermediate লেয়ারে ইনজেক্ট করে)।
-  - `prefix.py`: FedPF (Prefix-Tuning - ভার্চুয়াল কি/ভ্যালু টোকেন যুক্ত করে)।
-  - `lora.py`: FedLR (LoRA - কুয়েরি এবং ভ্যালু প্রজেকশনে লো-র‌্যাংক ম্যাট্রিক্স $W' = W + BA$ ইনজেক্ট করে)।
-  - `bitfit.py`: FedBF (BitFit - শুধুমাত্র বায়াস প্যারামিটার আনলক করে)।
-* **`client.py`:** ডিস্ট্রিবিউটেড ক্লায়েন্ট লোকাল ট্রেনিং ও শুধুমাত্র ট্রেইনেবল ওয়েট আপডেট রিটার্ন করে।
-* **`federated.py`:** ক্লায়েন্ট ডেটা সাইজের অনুপাতে সার্ভারে ওয়েটেড FedAvg এগ্রিগেশন সম্পন্ন করে।
-* **`server.py`:** সেন্ট্রাল সার্ভার কোঅর্ডিনেশন, ক্লায়েন্ট সিলেকশন ও ভ্যালিডেশন অ্যাকুরিসি/F1 পরিমাপ করে।
-* **`communication.py`:** প্যারামিটার ও মেগাবাইট সাইজ হিসাব করে ডাটা সাশ্রয় পার্সেন্টেজ নির্ধারণ করে।
-* **`privacy/gradient_inversion.py`:** DLG টেক্সট রিকন্সট্রাকশন এটাক সিমুলেট করে শব্দ রিকভারি প্রিসিশন পরিমাপ করে।
+  - `lora.py`: Low-Rank Adaptation (LoRA) কনফিগারেশন।
+  - `adapter.py`: Houlsby Bottleneck Adapter র‍্যাপার ও ইনজেক্টর।
+  - `prefix.py`: Prefix-Tuning কনফিগারেশন।
+  - `ia3.py`: $\text{IA}^3$ ভেক্টর স্কেলিং কনফিগারেশন।
+* **`client.py`:** ক্লায়েন্ট লোকাল ট্রেনিং লুপ ও শুধুমাত্র ট্রেইনেবল ওয়েট আপডেট রিটার্ন।
+* **`server.py`:** সার্ভার কোঅর্ডিনেশন, FedAvg অ্যাগ্রিগেশন ও ক্লায়েন্ট-ওয়াইজ ইভ্যালুয়েশন।
+* **`federated.py`:** ক্লায়েন্ট ডেটা সাইজের অনুপাতে ওয়েটেড FedAvg অ্যাগ্রিগেটর।
+* **`logger.py`:** রাউন্ড-বাই-রাউন্ড Global Acc, F1, Loss ও Client stats CSV এবং JSON-এ সংরক্ষণ।
+* **`run_experiments.py`:** অটোমেটিক ব্যাচ এক্সপেরিমেন্ট রানার (Resume ও Auto-Zip সুবিধা সহ)।
+* **`plot_results.py`:** পেপারের Convergence গ্রাফ, Robustness ড্রপ কার্ভ এবং LaTeX সামারি টেবিল জেনারেটর।
 
 ---
 
-## ৩. রান করার নিয়মাবলী (How to Run)
+## ৫. ইনস্টলেশন ও সেটআপ
 
-প্রথমে প্রয়োজনীয় লাইব্রেরি ইনস্টল করুন:
 ```bash
+git clone https://github.com/Tamal-Ghosh/test_model.git
+cd test_model
 pip install -r requirements.txt
-```
-
-### ক) নির্দিষ্ট একটি মেথড (যেমন LoRA) রান করতে:
-```bash
-python train.py --peft_method lora --dataset_name sst2
-```
-
-### খ) পেপারের সবকটি মেথড একসাথে রান করে তুলনামূলক রিপোর্ট তৈরি করতে:
-```bash
-python train.py --compare_all --dataset_name sst2
+pip install transformers datasets peft accelerate evaluate scikit-learn matplotlib seaborn
 ```
 
 ---
 
-## ৪. পেপারের মান বনাম আমাদের বাস্তবায়ন (Paper vs Our Implementation Gap Analysis)
+## ৬. এক্সপেরিমেন্ট চালানোর নিয়ম
 
-| উপাদান (Component) | পেপারের স্কেল (Paper Setup) | আমাদের বাস্তবায়ন (Our Implementation) | সামঞ্জস্য (Match Status) |
-| :--- | :--- | :--- | :---: |
-| **Model** | `roberta-base` (১২৫M) | `roberta-base` (১২৫M) | **Exact** |
-| **Datasets** | GLUE: RTE, MRPC, SST-2, QNLI, QQP, MNLI | Hugging Face GLUE datasets | **Exact** |
-| **PEFT Methods** | FT, Adapter, Prefix, LoRA, BitFit | ৫টি মেথডই পেপারের স্পেসিফিকেশন অনুযায়ী ইমপ্লিমেন্ট করা | **Exact** |
-| **Client Partitions** | Dirichlet Non-IID | Dirichlet partition with rounding error adjustment | **Exact** |
-| **Aggregation** | FedAvg | Weighted parameter average on trainable parameters | **Exact** |
-| **Optimizer** | AdamW | `torch.optim.AdamW` | **Exact** |
-| **Privacy Attack** | DLG (Zhu et al.) | DLG gradient inversion simulator (Word Precision/Recall) | **Approximate** |
+### ক. দ্রুত ভেরিফিকেশন টেস্ট রান (২ মিনিট):
+```bash
+python -u run_experiments.py --methods lora --budgets low --alphas 1.0 --seeds 42 --rounds 2 --max_train_samples 200 --max_val_samples 100 --output_dir results_test
+```
+
+### খ. পেপারের জন্য ফাস্ট ও স্ট্যান্ডার্ড রান (১৫,০০০ স্যাম্পলে ৫ গুণ দ্রুত):
+```bash
+python -u run_experiments.py \
+    --methods lora adapter prefix ia3 \
+    --budgets low \
+    --alphas 1.0 0.5 0.1 0.01 \
+    --seeds 42 43 44 \
+    --rounds 50 \
+    --batch_size 32 \
+    --max_train_samples 15000 \
+    --max_val_samples 1000 \
+    --output_dir results_low
+```
+
+### গ. সম্পূর্ণ ৪৮ কনফিগারেশন (সব বাজেট ও সব মেথড):
+```bash
+python -u run_experiments.py \
+    --methods all \
+    --budgets all \
+    --alphas 1.0 0.5 0.1 0.01 \
+    --seeds 42 43 44 \
+    --rounds 50 \
+    --batch_size 32 \
+    --output_dir results
+```
+
+> **Resume সুবিধা:** মাঝপথে রান বন্ধ হলেও আগের সফল রানগুলো নিজে থেকেই স্কিপ হয়ে পরবর্তীগুলো শুরু হবে।
+
+---
+
+## ৭. পেপারের গ্রাফ ও LaTeX টেবিল তৈরি করা
+
+এক্সপেরিমেন্ট শেষে মাত্র একটি কমান্ড দিন:
+```bash
+python plot_results.py --results_dir results_low --figures_dir results_low/figures
+```
+
+এটি স্বয়ংক্রিয়ভাবে নিচের ফাইলগুলো তৈরি করবে:
+1. **`convergence_curves.png`:** প্রতি রাউন্ডে গ্লোবাল অ্যাকুরেসির বৃদ্ধি (৪টি মেথডের তুলনামূলক রেখাচিত্র)।
+2. **`robustness_analysis.png`:** Non-IID বৃদ্ধির সাথে সাথে ($\alpha=1.0 \to 0.01$) কার অ্যাকুরেসি কতটা ড্রপ করে (Robustness Analysis)।
+3. **`summary_table.md` ও `summary_table.tex`:** ৩টি সিডের গড় ও স্ট্যান্ডার্ড ডেভিয়েশন ($\text{Mean} \pm \text{Std}$) এবং সরাসরি পেপারের LaTeX-এ যুক্ত করার মতো ফর্ম্যাটেড কোড:
+$$\text{Performance Drop} = \text{Accuracy}_{\alpha=1.0} - \text{Accuracy}_{\alpha=0.01}$$
