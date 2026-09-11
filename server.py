@@ -88,20 +88,22 @@ class Server:
         sampled_indices = np.random.choice(self.config.num_clients, num_sampled, replace=False)
         sampled_indices = sorted(sampled_indices.tolist())
         
-        print(f"\n[Server Round {round_idx}] Active Client IDs: {sampled_indices}")
+        print(f"\n[Server Round {round_idx}] Active Client IDs: {sampled_indices}", flush=True)
         
         client_updates = []
         client_train_losses = {}
         
         # 2. Sequential local training
-        for idx in sampled_indices:
+        for c_num, idx in enumerate(sampled_indices, 1):
             client = self.clients[idx]
+            print(f"  --> Client {c_num}/{len(sampled_indices)} (ID: {idx}, {len(client.dataset)} samples) training...", flush=True)
             updated_weights, size, loss = client.local_train(self.model, self.global_weights)
             client_updates.append((updated_weights, size))
             client_train_losses[idx] = loss
+            print(f"      Client {idx} finished. Local Loss: {loss:.4f}", flush=True)
             
         # 3. Federated Averaging (Aggregation)
-        print(f"[Server Round {round_idx}] Aggregating parameters from {len(client_updates)} clients...")
+        print(f"[Server Round {round_idx}] Aggregating parameters from {len(client_updates)} clients...", flush=True)
         self.global_weights = federated_average(client_updates)
         
         # 4. Synchronize the global model with the newly aggregated weights

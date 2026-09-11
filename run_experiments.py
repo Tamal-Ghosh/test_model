@@ -6,6 +6,10 @@ import copy
 import torch
 import numpy as np
 
+# Force instant unbuffered real-time stdout for Jupyter/Kaggle/Colab
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
 # Prevent OpenMP conflict on Windows
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -152,7 +156,8 @@ def run_single_experiment(
             f"Train Loss: {train_loss:.4f} | "
             f"Val Loss: {val_loss:.4f} | "
             f"Val Acc: {val_acc * 100:.2f}% | "
-            f"Macro-F1: {val_f1 * 100:.2f}%"
+            f"Macro-F1: {val_f1 * 100:.2f}%",
+            flush=True
         )
 
         # Log round metrics
