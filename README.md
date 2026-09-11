@@ -99,7 +99,8 @@ pip install transformers datasets peft accelerate evaluate scikit-learn matplotl
 python -u run_experiments.py --methods lora --budgets low --alphas 1.0 --seeds 42 --rounds 2 --max_train_samples 200 --max_val_samples 100 --output_dir results_test
 ```
 
-### খ. পেপারের জন্য ফাস্ট ও স্ট্যান্ডার্ড রান (১৫,০০০ স্যাম্পলে ৫ গুণ দ্রুত):
+### ক. ফুল ডেটাসেটে মূল পেপার রান (সম্পূর্ণ ১,২০,০০০ স্যাম্পল):
+ডিফল্টভাবে কোনো স্যাম্পল লিমিট না দিলে সম্পূর্ণ **১,২০,০০০ ট্রেইনিং স্যাম্পল** এবং **৭,৬০০ ভ্যালিডেশন স্যাম্পল** ব্যবহার হবে:
 ```bash
 python -u run_experiments.py \
     --methods lora adapter prefix ia3 \
@@ -107,13 +108,10 @@ python -u run_experiments.py \
     --alphas 1.0 0.5 0.1 0.01 \
     --seeds 42 43 44 \
     --rounds 50 \
-    --batch_size 32 \
-    --max_train_samples 15000 \
-    --max_val_samples 1000 \
     --output_dir results_low
 ```
 
-### গ. সম্পূর্ণ ৪৮ কনফিগারেশন (সব বাজেট ও সব মেথড):
+### খ. সম্পূর্ণ ৪৮ কনফিগারেশন (সব বাজেট, সব মেথড ও ফুল ডেটাসেট):
 ```bash
 python -u run_experiments.py \
     --methods all \
@@ -121,8 +119,16 @@ python -u run_experiments.py \
     --alphas 1.0 0.5 0.1 0.01 \
     --seeds 42 43 44 \
     --rounds 50 \
-    --batch_size 32 \
     --output_dir results
+```
+
+### গ. ঐচ্ছিক: দ্রুত ভেরিফিকেশন বা ফাস্ট রান (Subsampled):
+```bash
+# ২ মিনিটের কুইক টেস্ট
+python -u run_experiments.py --methods lora --budgets low --alphas 1.0 --seeds 42 --rounds 2 --max_train_samples 200 --max_val_samples 100 --output_dir results_test
+
+# ফাস্ট রান (১৫,০০০ স্যাম্পলে)
+python -u run_experiments.py --methods lora adapter prefix ia3 --budgets low --alphas 1.0 0.5 0.1 0.01 --seeds 42 --rounds 50 --max_train_samples 15000 --max_val_samples 1000 --output_dir results_low_fast
 ```
 
 > **Resume সুবিধা:** মাঝপথে রান বন্ধ হলেও আগের সফল রানগুলো নিজে থেকেই স্কিপ হয়ে পরবর্তীগুলো শুরু হবে।
